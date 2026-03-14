@@ -81,4 +81,12 @@ if st.sidebar.button("開始分析"):
                     st.warning("### ✅ 判定結果：趨勢擴張環境 (趨勢市)")
                     st.error("**決策：開啟順勢追擊劇本**")
                 else:
-                    st.info("### ✅ 判定結果：市況不明 (過渡期
+                    st.info("### ✅ 判定結果：市況不明 (過渡期)")
+                    st.write("目前 VA 寬度或 ADX 未同時達標，建議觀望。")
+
+                with st.expander("查看原始數據表"):
+                    st.dataframe(df.tail(10))
+
+        except Exception as e:
+            st.error(f"分析失敗: {str(e)}")
+            st.write("技術細節：嘗試將資料強制擠壓（Squeeze）為一維時出錯。")
