@@ -1,96 +1,92 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import numpy as np
 
-# --- 網頁設定 ---
-st.set_page_config(page_title="日內交易決策系統", layout="wide")
-st.title("📊 日內交易決策系統 (基於 VA 寬度與 ADX)")
-st.markdown("此系統利用 Yahoo Finance 即時數據，分析指定標的的市況，並給出**均值回歸**或**順勢追擊**的劇本建議。")
+# --- 核心邏輯：自定義 ADX 計算函數 (免安裝外部套件) ---
+def calculate_adx(df, length=14):
+    df = df.copy()
+    high = df['High']
+    low = df['Low']
+    close = df['Close']
+    
+    # 計算 TR (True Range)
+    tr1 = high - low
+    tr2 = abs(high - close.shift(1))
+    tr3 = abs(low - close.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # 計算方向變動 (DM)
+    up_move = high.diff()
+    down_move = low.diff()
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), abs(down_move), 0)
+    
+    # 使用平滑移動平均計算 ATR, +DI, -DI
+    atr = tr.rolling(window=length).mean()
+    plus_di = 100 * (pd.Series(plus_dm).rolling(window=length).mean() / atr)
+    minus_di = 100 * (pd.Series(minus_dm).rolling(window=length).mean() / atr)
+    
+    # 計算 DX 與 ADX
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di))
+    adx = dx.rolling(window=length).mean()
+    return adx
 
-# --- 側邊欄：參數設定 ---
+# --- 網頁配置 ---
+st.set_page_config(page_title="日內交易決策系統", layout="wide")
+st.title("📊 日內交易決策系統 (方案 B: 輕量穩定版)")
+
+# --- 側邊欄設定 ---
 st.sidebar.header("設定參數")
-ticker = st.sidebar.text_input("輸入股票/期貨代碼 (例如: NQ=F, AAPL, NVDA)", "NQ=F")
-va_threshold = st.sidebar.number_input("VA 寬度分水嶺 (%)", value=0.35, step=0.05)
+ticker = st.sidebar.text_input("輸入股票/期貨代碼", "NQ=F")
+va_threshold = st.sidebar.number_input("VA 寬度分水嶺 (%)", value=0.35, step=0.01)
 adx_threshold = st.sidebar.number_input("ADX 強弱分水嶺", value=25.0, step=1.0)
 
-# --- 核心邏輯 ---
 if st.sidebar.button("開始分析"):
-    with st.spinner(f"正在載入 {ticker} 的數據..."):
+    with st.spinner(f"正在抓取 {ticker} 實時數據..."):
         try:
-            # 獲取最近 5 天的 15 分鐘 K 線資料 (確保有足夠資料計算 ADX)
+            # 抓取 5 天內的 15 分鐘線 (yfinance 限制 15m 資料最多只能抓近 60 天)
             df = yf.download(ticker, period="5d", interval="15m")
             
             if df.empty:
-                st.error("無法獲取數據，請檢查股票代碼是否正確。")
+                st.error("找不到數據，請確認代碼（例如美股 AAPL, 指數期貨 NQ=F）")
             else:
-                # 1. 計算 ADX (使用 pandas_ta)
-                # 一般 ADX 週期設為 14
-                df.ta.adx(length=14, append=True)
+                # 執行自定義 ADX 計算
+                df['ADX_14'] = calculate_adx(df)
                 
-                # 取得最新一筆完整數據
-                latest_data = df.iloc[-1]
-                current_price = latest_data['Close'].iloc[0] if isinstance(latest_data['Close'], pd.Series) else latest_data['Close']
-                current_adx = latest_data['ADX_14']
+                # 取得最新一筆數據
+                latest = df.iloc[-1]
+                # 處理 yfinance 可能產生的 MultiIndex 格式
+                price = float(latest['Close'].iloc[0]) if isinstance(latest['Close'], pd.Series) else float(latest['Close'])
+                adx_val = float(latest['ADX_14'].iloc[0]) if isinstance(latest['ADX_14'], pd.Series) else float(latest['ADX_14'])
                 
-                # 2. 估算 VA 寬度 (Value Area Width)
-                # 由於 Yahoo Finance 沒有直接提供 Tick 級別的成交量分佈 (Volume Profile)
-                # 這裡我們使用當日最高價與最低價的區間，或是近 10 根 K 線的真實波幅 (ATR) 來「近似」價值區的寬度
-                # 公式：VA 寬度 = (當日最高 - 當日最低) / 目前價格
-                today_data = df.loc[df.index.date == df.index[-1].date()]
-                if not today_data.empty:
-                    val = today_data['Low'].min()
-                    vah = today_data['High'].max()
+                # 近似計算 VA 寬度 (當日高低差)
+                today_df = df.loc[df.index.date == df.index[-1].date()]
+                high_val = float(today_df['High'].max())
+                low_val = float(today_df['Low'].min())
+                va_width = ((high_val - low_val) / price) * 100
+
+                # --- 儀表板展示 ---
+                c1, c2, c3 = st.columns(3)
+                c1.metric("目前價格", f"{price:,.2f}")
+                c2.metric("VA 寬度 (估)", f"{va_width:.2f}%")
+                c3.metric("ADX 動能", f"{adx_val:.2f}")
+
+                st.divider()
+
+                # --- 邏輯判斷 ---
+                if va_width < va_threshold and adx_val < adx_threshold:
+                    st.success("### ✅ 判定結果：高盤整環境 (震盪市)")
+                    st.info("**決策：鎖定均值回歸劇本** (模型 2, 4, 7)")
+                elif va_width >= va_threshold and adx_val >= adx_threshold:
+                    st.warning("### ✅ 判定結果：趨勢擴張環境 (趨勢市)")
+                    st.error("**決策：開啟順勢追擊劇本** (模型 3, 5, 14)")
                 else:
-                    val = df['Low'].iloc[-10:].min()
-                    vah = df['High'].iloc[-10:].max()
-                
-                # 將 pd.Series 轉為純數值避免錯誤
-                val = float(val.iloc[0]) if isinstance(val, pd.Series) else float(val)
-                vah = float(vah.iloc[0]) if isinstance(vah, pd.Series) else float(vah)
-                current_price = float(current_price)
-                
-                va_width_pct = ((vah - val) / current_price) * 100
+                    st.info("### ✅ 判定結果：市況不明 (過渡期)")
+                    st.write("目前指標分歧，建議觀望 09:30-10:00 交叉驗證期。")
 
-                # --- 介面展示 ---
-                col1, col2, col3 = st.columns(3)
-                col1.metric("目前價格", f"{current_price:.2f}")
-                col2.metric("估算 VA 寬度", f"{va_width_pct:.2f}%", f"{va_width_pct - va_threshold:.2f}% (距分水嶺)")
-                col3.metric("目前 ADX (動能)", f"{current_adx:.2f}")
-
-                st.markdown("---")
-                
-                # --- 決策樹邏輯判定 ---
-                st.subheader("💡 系統判定與劇本建議")
-                
-                if va_width_pct < va_threshold and current_adx < adx_threshold:
-                    st.success("✅ 判定結果：**高盤整環境 (震盪市)**")
-                    st.info("""
-                    **執行決策：強制鎖定均值回歸劇本**
-                    * **狀態分析：** 價值區窄小 (小於 0.35%)，且趨勢動能低迷，市場缺乏明確方向。
-                    * **操作建議：** 採取高出低進策略。
-                    * **適用模型：** 區間交易、均值回歸、盤整突破失守 (假突破反做)。
-                    """)
-                elif va_width_pct >= va_threshold and current_adx >= adx_threshold:
-                    st.success("✅ 判定結果：**趨勢擴張環境 (趨勢市)**")
-                    st.warning("""
-                    **執行決策：開啟順勢追擊劇本**
-                    * **狀態分析：** 價值區擴大 (大於 0.35%)，且 ADX 顯示趨勢強勁。
-                    * **操作建議：** 不要猜頭摸底，順著突破方向追擊或等待回踩後順勢進場。
-                    * **適用模型：** 順勢突破、趨勢回踩、趨勢波段。
-                    """)
-                else:
-                    st.success("✅ 判定結果：**過渡期 / 複雜環境**")
-                    st.markdown("""
-                    **執行決策：建議觀望或縮小部位**
-                    * **狀態分析：** VA 寬度與 ADX 指標出現分歧（例如：波動率大但無明確趨勢，或有趨勢但空間未打開）。
-                    * **操作建議：** 等待 09:30-10:00 的早盤籌碼沉澱，直到指標方向一致。
-                    """)
-                    
-                # 顯示原始數據供參考
-                with st.expander("查看近期數據明細"):
-                    st.dataframe(df[['Open', 'High', 'Low', 'Close', 'Volume', 'ADX_14']].tail(10))
-
+                with st.expander("查看原始數據"):
+                    st.write(df.tail(10))
         except Exception as e:
-            st.error(f"發生錯誤: {e}")
+            st.error(f"分析失敗: {str(e)}")
